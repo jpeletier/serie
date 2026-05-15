@@ -6,6 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use ratatui::style::{Color, Style};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -15,7 +16,7 @@ use crate::{
         geometry::{bounding_box_u32, Point},
         Edge, EdgeType, Graph,
     },
-    protocol::{ImageProtocol, PreparedImage},
+    protocol::{ImageProtocol, PreparedImage, PreparedImageCell},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,16 +92,24 @@ impl<'a> GraphImageManager<'a> {
             return;
         }
         let image_id = graph_image_id(self.session_nonce, commit_hash);
-        let graph_row_image = build_single_graph_row_image(
-            self.graph,
-            &self.image_params,
-            &self.drawing_pixels,
-            self.graph_style,
-            self.image_width_mode,
-            commit_hash,
-        );
-        let mut image =
-            graph_row_image.prepare(self.cell_width_type, self.image_protocol, image_id);
+        let mut image = if matches!(self.image_protocol, ImageProtocol::Ascii) {
+            build_ascii_prepared_image(
+                self.graph,
+                &self.image_params,
+                self.image_width_mode,
+                commit_hash,
+            )
+        } else {
+            let graph_row_image = build_single_graph_row_image(
+                self.graph,
+                &self.image_params,
+                &self.drawing_pixels,
+                self.graph_style,
+                self.image_width_mode,
+                commit_hash,
+            );
+            graph_row_image.prepare(self.cell_width_type, self.image_protocol, image_id)
+        };
         if let Some(upload_data) = image.take_upload_data() {
             self.pending_uploads.push(upload_data);
         }
@@ -218,6 +227,130 @@ impl ImageParams {
             self.height / 2
         }
     }
+}
+
+#[derive(Default, Clone, Copy)]
+struct AsciiDirections {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+fn ascii_symbol(d: AsciiDirections) -> char {
+    match (d.up, d.down, d.left, d.right) {
+        (true, true, true, true) => '\u{253C}',   // ┼
+        (true, true, true, false) => '\u{2524}',  // ┤
+        (true, true, false, true) => '\u{251C}',  // ├
+        (true, false, true, true) => '\u{2534}',  // ┴
+        (false, true, true, true) => '\u{252C}',  // ┬
+        (true, true, false, false) => '\u{2502}', // │
+        (false, false, true, true) => '\u{2500}', // ─
+        (true, false, false, true) => '\u{2514}', // └
+        (true, false, true, false) => '\u{2518}', // ┘
+        (false, true, false, true) => '\u{250C}', // ┌
+        (false, true, true, false) => '\u{2510}', // ┐
+        (true, false, false, false) => '\u{2502}', // │ (terminator → use full vertical)
+        (false, true, false, false) => '\u{2502}', // │
+        (false, false, true, false) => '\u{2500}', // ─
+        (false, false, false, true) => '\u{2500}', // ─
+        (false, false, false, false) => ' ',
+    }
+}
+
+fn edge_directions(edge_type: EdgeType) -> AsciiDirections {
+    let mut d = AsciiDirections::default();
+    match edge_type {
+        EdgeType::Vertical => {
+            d.up = true;
+            d.down = true;
+        }
+        EdgeType::Horizontal => {
+            d.left = true;
+            d.right = true;
+        }
+        EdgeType::Up => d.up = true,
+        EdgeType::Down => d.down = true,
+        EdgeType::Left => d.left = true,
+        EdgeType::Right => d.right = true,
+        // Rounded-corner edges: the name describes which corner of the cell the curve
+        // occupies. ╭ (LeftTop) connects down + right, ╮ (RightTop) down + left,
+        // ╰ (LeftBottom) up + right, ╯ (RightBottom) up + left.
+        EdgeType::LeftTop => {
+            d.down = true;
+            d.right = true;
+        }
+        EdgeType::RightTop => {
+            d.down = true;
+            d.left = true;
+        }
+        EdgeType::LeftBottom => {
+            d.up = true;
+            d.right = true;
+        }
+        EdgeType::RightBottom => {
+            d.up = true;
+            d.left = true;
+        }
+    }
+    d
+}
+
+fn image_color_to_ratatui(c: image::Rgba<u8>) -> Color {
+    Color::Rgb(c[0], c[1], c[2])
+}
+
+fn build_ascii_prepared_image(
+    graph: &Graph<'_>,
+    image_params: &ImageParams,
+    image_width_mode: GraphImageWidthMode,
+    commit_hash: &CommitHash,
+) -> PreparedImage {
+    let (pos_x, pos_y) = graph.commit_pos_map[&commit_hash];
+    let edges = &graph.edges[pos_y];
+
+    let max_pos_x = match image_width_mode {
+        GraphImageWidthMode::Compact => edges.iter().map(|e| e.pos_x).fold(pos_x, usize::max),
+        GraphImageWidthMode::Fixed => graph.max_pos_x,
+    };
+    let cell_count = max_pos_x + 1;
+
+    let mut cells = Vec::with_capacity(cell_count);
+    for x in 0..cell_count {
+        if x == pos_x {
+            let color = image_color_to_ratatui(image_params.edge_color(pos_x));
+            cells.push(PreparedImageCell::new(
+                "*".to_string(),
+                Style::default().fg(color),
+            ));
+            continue;
+        }
+
+        let mut dirs = AsciiDirections::default();
+        let mut color_idx: Option<usize> = None;
+        for e in edges.iter().filter(|e| e.pos_x == x) {
+            let ed = edge_directions(e.edge_type);
+            dirs.up |= ed.up;
+            dirs.down |= ed.down;
+            dirs.left |= ed.left;
+            dirs.right |= ed.right;
+            // Prefer the color of vertical-running lines, since a "trunk" branch
+            // passing through is what the eye follows; horizontal hops just borrow
+            // the same cell. Fall back to whatever the first edge says otherwise.
+            if color_idx.is_none() || e.edge_type.is_vertically_related() {
+                color_idx = Some(e.associated_line_pos_x);
+            }
+        }
+
+        let symbol = ascii_symbol(dirs);
+        let style = match color_idx {
+            Some(idx) => Style::default().fg(image_color_to_ratatui(image_params.edge_color(idx))),
+            None => Style::default(),
+        };
+        cells.push(PreparedImageCell::new(symbol.to_string(), style));
+    }
+
+    PreparedImage::from_cells(cells)
 }
 
 fn build_single_graph_row_image(

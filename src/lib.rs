@@ -55,6 +55,7 @@ pub enum ImageProtocolType {
     Iterm,
     Kitty,
     KittyUnicode,
+    Ascii,
 }
 
 impl From<Option<ImageProtocolType>> for protocol::ImageProtocol {
@@ -66,6 +67,7 @@ impl From<Option<ImageProtocolType>> for protocol::ImageProtocol {
             Some(ImageProtocolType::KittyUnicode) => protocol::ImageProtocol::KittyUnicode {
                 tmux: protocol::detect_tmux(),
             },
+            Some(ImageProtocolType::Ascii) => protocol::ImageProtocol::Ascii,
             None => protocol::auto_detect(),
         }
     }
@@ -138,9 +140,16 @@ pub fn run() -> Result<()> {
     let keybind = keybind::KeyBind::new(keybind_patch);
 
     let max_count = args.max_count;
-    let image_protocol = args.protocol.or(core_config.option.protocol).into();
+    let image_protocol: protocol::ImageProtocol =
+        args.protocol.or(core_config.option.protocol).into();
     let order = args.order.or(core_config.option.order).into();
-    let graph_width = args.graph_width.or(core_config.option.graph_width);
+    // ASCII rendering uses exactly one character per graph column, so override any
+    // requested "double" width and skip the layout calculation that adds a column.
+    let graph_width = if matches!(image_protocol, protocol::ImageProtocol::Ascii) {
+        Some(GraphWidthType::Single)
+    } else {
+        args.graph_width.or(core_config.option.graph_width)
+    };
     let graph_style = args.graph_style.or(core_config.option.graph_style).into();
     let graph_image_width_mode = graph_config.row_image_width;
     let initial_selection = args
