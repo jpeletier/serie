@@ -46,6 +46,10 @@ struct Args {
     /// Initial selection of commit [default: latest]
     #[arg(short, long, value_name = "TYPE")]
     initial_selection: Option<InitialSelection>,
+
+    /// Auto-refresh the view on an interval (seconds) [default: 30]
+    #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "30")]
+    watch: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
@@ -158,7 +162,8 @@ pub fn run() -> Result<()> {
         image_protocol,
     });
 
-    let ec = event::EventController::init();
+    let watch_interval = args.watch.map(|s| std::time::Duration::from_secs(s.max(5)));
+    let ec = event::EventController::init(watch_interval);
     let mut refresh_view_context = None;
     let mut terminal = None;
 
