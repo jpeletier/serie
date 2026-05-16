@@ -97,6 +97,7 @@ impl<'a> GraphImageManager<'a> {
                 self.graph,
                 &self.image_params,
                 self.image_width_mode,
+                self.graph_style,
                 commit_hash,
             )
         } else {
@@ -237,19 +238,25 @@ struct AsciiDirections {
     right: bool,
 }
 
-fn ascii_symbol(d: AsciiDirections) -> char {
+fn ascii_symbol(d: AsciiDirections, style: GraphStyle) -> char {
+    // T-junctions and crosses are the same in both styles — only the four single
+    // corners have a rounded variant (╭╮╰╯) versus an angular one (┌┐└┘).
+    let (top_left, top_right, bottom_left, bottom_right) = match style {
+        GraphStyle::Rounded => ('\u{256D}', '\u{256E}', '\u{2570}', '\u{256F}'),
+        GraphStyle::Angular => ('\u{250C}', '\u{2510}', '\u{2514}', '\u{2518}'),
+    };
     match (d.up, d.down, d.left, d.right) {
-        (true, true, true, true) => '\u{253C}',   // ┼
-        (true, true, true, false) => '\u{2524}',  // ┤
-        (true, true, false, true) => '\u{251C}',  // ├
-        (true, false, true, true) => '\u{2534}',  // ┴
-        (false, true, true, true) => '\u{252C}',  // ┬
-        (true, true, false, false) => '\u{2502}', // │
-        (false, false, true, true) => '\u{2500}', // ─
-        (true, false, false, true) => '\u{2514}', // └
-        (true, false, true, false) => '\u{2518}', // ┘
-        (false, true, false, true) => '\u{250C}', // ┌
-        (false, true, true, false) => '\u{2510}', // ┐
+        (true, true, true, true) => '\u{253C}',    // ┼
+        (true, true, true, false) => '\u{2524}',   // ┤
+        (true, true, false, true) => '\u{251C}',   // ├
+        (true, false, true, true) => '\u{2534}',   // ┴
+        (false, true, true, true) => '\u{252C}',   // ┬
+        (true, true, false, false) => '\u{2502}',  // │
+        (false, false, true, true) => '\u{2500}',  // ─
+        (true, false, false, true) => bottom_left, // └ / ╰
+        (true, false, true, false) => bottom_right, // ┘ / ╯
+        (false, true, false, true) => top_left,    // ┌ / ╭
+        (false, true, true, false) => top_right,   // ┐ / ╮
         (true, false, false, false) => '\u{2502}', // │ (terminator → use full vertical)
         (false, true, false, false) => '\u{2502}', // │
         (false, false, true, false) => '\u{2500}', // ─
@@ -304,6 +311,7 @@ fn build_ascii_prepared_image(
     graph: &Graph<'_>,
     image_params: &ImageParams,
     image_width_mode: GraphImageWidthMode,
+    graph_style: GraphStyle,
     commit_hash: &CommitHash,
 ) -> PreparedImage {
     let (pos_x, pos_y) = graph.commit_pos_map[&commit_hash];
@@ -320,7 +328,7 @@ fn build_ascii_prepared_image(
         if x == pos_x {
             let color = image_color_to_ratatui(image_params.edge_color(pos_x));
             cells.push(PreparedImageCell::new(
-                "*".to_string(),
+                "\u{25CF}".to_string(), // ●
                 Style::default().fg(color),
             ));
             continue;
@@ -342,7 +350,7 @@ fn build_ascii_prepared_image(
             }
         }
 
-        let symbol = ascii_symbol(dirs);
+        let symbol = ascii_symbol(dirs, graph_style);
         let style = match color_idx {
             Some(idx) => Style::default().fg(image_color_to_ratatui(image_params.edge_color(idx))),
             None => Style::default(),
