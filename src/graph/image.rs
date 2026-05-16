@@ -98,6 +98,7 @@ impl<'a> GraphImageManager<'a> {
                 &self.image_params,
                 self.image_width_mode,
                 self.graph_style,
+                self.cell_width_type,
                 commit_hash,
             )
         } else {
@@ -307,11 +308,17 @@ fn image_color_to_ratatui(c: image::Rgba<u8>) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
+struct AsciiCell {
+    dirs: AsciiDirections,
+    color_idx: Option<usize>,
+}
+
 fn build_ascii_prepared_image(
     graph: &Graph<'_>,
     image_params: &ImageParams,
     image_width_mode: GraphImageWidthMode,
     graph_style: GraphStyle,
+    cell_width_type: CellWidthType,
     commit_hash: &CommitHash,
 ) -> PreparedImage {
     let (pos_x, pos_y) = graph.commit_pos_map[&commit_hash];
@@ -323,39 +330,110 @@ fn build_ascii_prepared_image(
     };
     let cell_count = max_pos_x + 1;
 
-    let mut cells = Vec::with_capacity(cell_count);
-    for x in 0..cell_count {
+    render_ascii_row(
+        pos_x,
+        cell_count,
+        edges,
+        image_params,
+        graph_style,
+        cell_width_type,
+    )
+}
+
+fn render_ascii_row(
+    pos_x: usize,
+    cell_count: usize,
+    edges: &[Edge],
+    image_params: &ImageParams,
+    graph_style: GraphStyle,
+    cell_width_type: CellWidthType,
+) -> PreparedImage {
+    let columns: Vec<AsciiCell> = (0..cell_count)
+        .map(|x| {
+            let mut dirs = AsciiDirections::default();
+            let mut color_idx: Option<usize> = None;
+            for e in edges.iter().filter(|e| e.pos_x == x) {
+                let ed = edge_directions(e.edge_type);
+                dirs.up |= ed.up;
+                dirs.down |= ed.down;
+                dirs.left |= ed.left;
+                dirs.right |= ed.right;
+                // Prefer the color of vertical-running lines, since a "trunk" branch
+                // passing through is what the eye follows; horizontal hops just borrow
+                // the same cell. Fall back to whatever the first edge says otherwise.
+                if color_idx.is_none() || e.edge_type.is_vertically_related() {
+                    color_idx = Some(e.associated_line_pos_x);
+                }
+            }
+            AsciiCell { dirs, color_idx }
+        })
+        .collect();
+
+    // Distinguish "merge into this commit" from "child branched off from this commit":
+    // both produce horizontal edges at this row, but the corner type tells them apart.
+    //   Merge        →  LeftTop (╭) / RightTop (╮)  — line comes UP from a parent below
+    //   Branch off   →  LeftBottom (╰) / RightBottom (╯) — line goes UP to a child above
+    let is_merge_at_row = edges
+        .iter()
+        .any(|e| matches!(e.edge_type, EdgeType::LeftTop | EdgeType::RightTop));
+    let commit_has_left_entry = is_merge_at_row && columns[pos_x].dirs.left;
+    let commit_has_right_entry = is_merge_at_row && columns[pos_x].dirs.right;
+
+    let commit_color = image_color_to_ratatui(image_params.edge_color(pos_x));
+    let commit_symbol = if is_merge_at_row {
+        "\u{25CB}" // ○
+    } else {
+        "\u{25CF}" // ●
+    };
+    let commit_style = Style::default().fg(commit_color);
+
+    let mut cells = Vec::with_capacity(cell_count * 2);
+    for (x, col) in columns.iter().enumerate() {
+        // --- symbol cell ---
         if x == pos_x {
-            let color = image_color_to_ratatui(image_params.edge_color(pos_x));
             cells.push(PreparedImageCell::new(
-                "\u{25CF}".to_string(), // ●
-                Style::default().fg(color),
+                commit_symbol.to_string(),
+                commit_style,
             ));
-            continue;
+        } else {
+            let symbol = ascii_symbol(col.dirs, graph_style);
+            let style = match col.color_idx {
+                Some(idx) => {
+                    Style::default().fg(image_color_to_ratatui(image_params.edge_color(idx)))
+                }
+                None => Style::default(),
+            };
+            cells.push(PreparedImageCell::new(symbol.to_string(), style));
         }
 
-        let mut dirs = AsciiDirections::default();
-        let mut color_idx: Option<usize> = None;
-        for e in edges.iter().filter(|e| e.pos_x == x) {
-            let ed = edge_directions(e.edge_type);
-            dirs.up |= ed.up;
-            dirs.down |= ed.down;
-            dirs.left |= ed.left;
-            dirs.right |= ed.right;
-            // Prefer the color of vertical-running lines, since a "trunk" branch
-            // passing through is what the eye follows; horizontal hops just borrow
-            // the same cell. Fall back to whatever the first edge says otherwise.
-            if color_idx.is_none() || e.edge_type.is_vertically_related() {
-                color_idx = Some(e.associated_line_pos_x);
+        // --- filler cell (only in double width) ---
+        if matches!(cell_width_type, CellWidthType::Double) {
+            // When a merge lands at this row, draw an arrow in the filler slot
+            // adjacent to the commit so the direction of the incoming branch reads.
+            // > points right into a commit receiving from the left.
+            // < points left into a commit receiving from the right.
+            let arrow_into_next = commit_has_left_entry && x + 1 == pos_x;
+            let arrow_into_prev = commit_has_right_entry && x == pos_x;
+
+            if arrow_into_next {
+                cells.push(PreparedImageCell::new(">".to_string(), commit_style));
+            } else if arrow_into_prev {
+                cells.push(PreparedImageCell::new("<".to_string(), commit_style));
+            } else if col.dirs.right
+                || x + 1 < cell_count && columns[x + 1].dirs.left
+            {
+                // Horizontal line continues across the gap to the next column.
+                let style = match col.color_idx.or(columns.get(x + 1).and_then(|c| c.color_idx)) {
+                    Some(idx) => {
+                        Style::default().fg(image_color_to_ratatui(image_params.edge_color(idx)))
+                    }
+                    None => Style::default(),
+                };
+                cells.push(PreparedImageCell::new("\u{2500}".to_string(), style)); // ─
+            } else {
+                cells.push(PreparedImageCell::new(" ".to_string(), Style::default()));
             }
         }
-
-        let symbol = ascii_symbol(dirs, graph_style);
-        let style = match color_idx {
-            Some(idx) => Style::default().fg(image_color_to_ratatui(image_params.edge_color(idx))),
-            None => Style::default(),
-        };
-        cells.push(PreparedImageCell::new(symbol.to_string(), style));
     }
 
     PreparedImage::from_cells(cells)
@@ -1387,5 +1465,229 @@ mod tests {
     fn create_output_dirs(path: &str) {
         let path = Path::new(path);
         std::fs::create_dir_all(path).unwrap();
+    }
+
+    // ---------------------------------------------------------------------
+    // ASCII renderer tests
+    // ---------------------------------------------------------------------
+
+    fn ascii_image_params() -> ImageParams {
+        let graph_color_config = GraphColorConfig::default();
+        let graph_color_set = GraphColorSet::new(&graph_color_config);
+        ImageParams::new(&graph_color_set, CellWidthType::Single)
+    }
+
+    fn symbols(image: &PreparedImage) -> String {
+        image.cells().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[rstest]
+    #[case(EdgeType::Vertical,    (true,  true,  false, false))]
+    #[case(EdgeType::Horizontal,  (false, false, true,  true))]
+    #[case(EdgeType::Up,          (true,  false, false, false))]
+    #[case(EdgeType::Down,        (false, true,  false, false))]
+    #[case(EdgeType::Left,        (false, false, true,  false))]
+    #[case(EdgeType::Right,       (false, false, false, true))]
+    #[case(EdgeType::LeftTop,     (false, true,  false, true))]
+    #[case(EdgeType::RightTop,    (false, true,  true,  false))]
+    #[case(EdgeType::LeftBottom,  (true,  false, false, true))]
+    #[case(EdgeType::RightBottom, (true,  false, true,  false))]
+    fn test_edge_directions(
+        #[case] edge: EdgeType,
+        #[case] expected: (bool, bool, bool, bool),
+    ) {
+        let d = edge_directions(edge);
+        assert_eq!((d.up, d.down, d.left, d.right), expected);
+    }
+
+    fn dirs(up: bool, down: bool, left: bool, right: bool) -> AsciiDirections {
+        AsciiDirections { up, down, left, right }
+    }
+
+    #[rstest]
+    // T-junctions and cross are style-independent.
+    #[case(dirs(true,  true,  true,  true),  GraphStyle::Rounded, '┼')]
+    #[case(dirs(true,  true,  true,  false), GraphStyle::Rounded, '┤')]
+    #[case(dirs(true,  true,  false, true),  GraphStyle::Rounded, '├')]
+    #[case(dirs(true,  false, true,  true),  GraphStyle::Rounded, '┴')]
+    #[case(dirs(false, true,  true,  true),  GraphStyle::Rounded, '┬')]
+    // Straight lines.
+    #[case(dirs(true,  true,  false, false), GraphStyle::Rounded, '│')]
+    #[case(dirs(false, false, true,  true),  GraphStyle::Rounded, '─')]
+    // Corners differ between styles.
+    #[case(dirs(true,  false, false, true),  GraphStyle::Rounded, '╰')]
+    #[case(dirs(true,  false, true,  false), GraphStyle::Rounded, '╯')]
+    #[case(dirs(false, true,  false, true),  GraphStyle::Rounded, '╭')]
+    #[case(dirs(false, true,  true,  false), GraphStyle::Rounded, '╮')]
+    #[case(dirs(true,  false, false, true),  GraphStyle::Angular, '└')]
+    #[case(dirs(true,  false, true,  false), GraphStyle::Angular, '┘')]
+    #[case(dirs(false, true,  false, true),  GraphStyle::Angular, '┌')]
+    #[case(dirs(false, true,  true,  false), GraphStyle::Angular, '┐')]
+    // Single-direction "stubs" promote to a full vertical or horizontal.
+    #[case(dirs(true,  false, false, false), GraphStyle::Rounded, '│')]
+    #[case(dirs(false, true,  false, false), GraphStyle::Rounded, '│')]
+    #[case(dirs(false, false, true,  false), GraphStyle::Rounded, '─')]
+    #[case(dirs(false, false, false, true),  GraphStyle::Rounded, '─')]
+    // Empty cell is a space.
+    #[case(dirs(false, false, false, false), GraphStyle::Rounded, ' ')]
+    fn test_ascii_symbol(
+        #[case] d: AsciiDirections,
+        #[case] style: GraphStyle,
+        #[case] expected: char,
+    ) {
+        assert_eq!(ascii_symbol(d, style), expected);
+    }
+
+    #[test]
+    fn test_render_ascii_row_single_width_simple_branch() {
+        // Branch source at pos_x=1: a child branches off to col 3.
+        //   col 0: ╰ (LeftBottom)
+        //   col 1: ● commit (has Left + Down + Right at its col)
+        //   col 2: ─ (Horizontal)
+        //   col 3: ╯ (RightBottom)
+        let edges = vec![
+            Edge::new(EdgeType::LeftBottom, 0, 0),
+            Edge::new(EdgeType::Left, 1, 0),
+            Edge::new(EdgeType::Down, 1, 1),
+            Edge::new(EdgeType::Right, 1, 3),
+            Edge::new(EdgeType::Horizontal, 2, 3),
+            Edge::new(EdgeType::RightBottom, 3, 3),
+        ];
+        let params = ascii_image_params();
+        let image = render_ascii_row(
+            1, 4, &edges, &params, GraphStyle::Rounded, CellWidthType::Single,
+        );
+        assert_eq!(symbols(&image), "╰●─╯");
+    }
+
+    #[test]
+    fn test_render_ascii_row_single_width_angular_corners() {
+        let edges = vec![
+            Edge::new(EdgeType::LeftBottom, 0, 0),
+            Edge::new(EdgeType::Left, 1, 0),
+            Edge::new(EdgeType::Down, 1, 1),
+            Edge::new(EdgeType::Right, 1, 3),
+            Edge::new(EdgeType::Horizontal, 2, 3),
+            Edge::new(EdgeType::RightBottom, 3, 3),
+        ];
+        let params = ascii_image_params();
+        let image = render_ascii_row(
+            1, 4, &edges, &params, GraphStyle::Angular, CellWidthType::Single,
+        );
+        assert_eq!(symbols(&image), "└●─┘");
+    }
+
+    #[test]
+    fn test_render_ascii_row_single_width_straight_vertical() {
+        // A commit on a straight branch with another branch passing vertically next to it.
+        //   col 0: │ (Vertical, unrelated branch)
+        //   col 3: ● commit
+        let edges = vec![
+            Edge::new(EdgeType::Vertical, 0, 0),
+            Edge::new(EdgeType::Up, 3, 3),
+            Edge::new(EdgeType::Down, 3, 3),
+        ];
+        let params = ascii_image_params();
+        let image = render_ascii_row(
+            3, 4, &edges, &params, GraphStyle::Rounded, CellWidthType::Single,
+        );
+        assert_eq!(symbols(&image), "│  ●");
+    }
+
+    #[test]
+    fn test_render_ascii_row_branch_source_stays_solid_dot() {
+        // Branch source: only LeftBottom/RightBottom corners → commit must stay ●.
+        let edges = vec![
+            Edge::new(EdgeType::LeftBottom, 0, 0),
+            Edge::new(EdgeType::Left, 1, 0),
+            Edge::new(EdgeType::Down, 1, 1),
+            Edge::new(EdgeType::Right, 1, 3),
+            Edge::new(EdgeType::Horizontal, 2, 3),
+            Edge::new(EdgeType::RightBottom, 3, 3),
+        ];
+        let params = ascii_image_params();
+        let image = render_ascii_row(
+            1, 4, &edges, &params, GraphStyle::Rounded, CellWidthType::Single,
+        );
+        // Commit at index 1 should still be ● because there are no top corners.
+        assert_eq!(image.cells()[1].symbol(), "●");
+    }
+
+    #[test]
+    fn test_render_ascii_row_merge_uses_open_circle() {
+        // Merge into commit at pos_x=2 from a parent below at col 0.
+        //   col 0: ╭ (LeftTop) — line comes up from below, then goes right
+        //   col 1: ─ (Horizontal)
+        //   col 2: ○ merge commit (has Left edge at its col)
+        let edges = vec![
+            Edge::new(EdgeType::LeftTop, 0, 0),
+            Edge::new(EdgeType::Horizontal, 1, 0),
+            Edge::new(EdgeType::Left, 2, 0),
+            Edge::new(EdgeType::Up, 2, 2),
+            Edge::new(EdgeType::Down, 2, 2),
+        ];
+        let params = ascii_image_params();
+        let image = render_ascii_row(
+            2, 3, &edges, &params, GraphStyle::Rounded, CellWidthType::Single,
+        );
+        assert_eq!(symbols(&image), "╭─○");
+    }
+
+    #[test]
+    fn test_render_ascii_row_double_width_branch_source() {
+        // Same branch-source row as above, in double width. Filler chars span the gap:
+        // `─` where a horizontal continues, space otherwise. No arrows because not a merge.
+        let edges = vec![
+            Edge::new(EdgeType::LeftBottom, 0, 0),
+            Edge::new(EdgeType::Left, 1, 0),
+            Edge::new(EdgeType::Down, 1, 1),
+            Edge::new(EdgeType::Right, 1, 3),
+            Edge::new(EdgeType::Horizontal, 2, 3),
+            Edge::new(EdgeType::RightBottom, 3, 3),
+        ];
+        let params = ascii_image_params();
+        let image = render_ascii_row(
+            1, 4, &edges, &params, GraphStyle::Rounded, CellWidthType::Double,
+        );
+        // 4 columns × 2 chars: ╰─ ●─ ── ╯<space>
+        assert_eq!(symbols(&image), "╰─●───╯ ");
+    }
+
+    #[test]
+    fn test_render_ascii_row_double_width_merge_left_arrow() {
+        // Merge entering merge commit at col 2 from the left. Expect `>` arrow in the
+        // filler slot immediately before ○.
+        let edges = vec![
+            Edge::new(EdgeType::LeftTop, 0, 0),
+            Edge::new(EdgeType::Horizontal, 1, 0),
+            Edge::new(EdgeType::Left, 2, 0),
+            Edge::new(EdgeType::Up, 2, 2),
+            Edge::new(EdgeType::Down, 2, 2),
+        ];
+        let params = ascii_image_params();
+        let image = render_ascii_row(
+            2, 3, &edges, &params, GraphStyle::Rounded, CellWidthType::Double,
+        );
+        // 3 cols × 2 chars: ╭─ ─> ○_ — arrow at filler of col 1.
+        assert_eq!(symbols(&image), "╭──>○ ");
+    }
+
+    #[test]
+    fn test_render_ascii_row_double_width_merge_right_arrow() {
+        // Merge entering merge commit at col 0 from the right. Expect `<` arrow in the
+        // filler slot immediately after ○.
+        let edges = vec![
+            Edge::new(EdgeType::Right, 0, 2),
+            Edge::new(EdgeType::Horizontal, 1, 2),
+            Edge::new(EdgeType::RightTop, 2, 2),
+            Edge::new(EdgeType::Up, 0, 0),
+            Edge::new(EdgeType::Down, 0, 0),
+        ];
+        let params = ascii_image_params();
+        let image = render_ascii_row(
+            0, 3, &edges, &params, GraphStyle::Rounded, CellWidthType::Double,
+        );
+        // ○<──╮ — arrow at index 1 (filler of commit's col).
+        assert_eq!(symbols(&image), "○<──╮ ");
     }
 }

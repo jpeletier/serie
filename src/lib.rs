@@ -143,13 +143,7 @@ pub fn run() -> Result<()> {
     let image_protocol: protocol::ImageProtocol =
         args.protocol.or(core_config.option.protocol).into();
     let order = args.order.or(core_config.option.order).into();
-    // ASCII rendering uses exactly one character per graph column, so override any
-    // requested "double" width and skip the layout calculation that adds a column.
-    let graph_width = if matches!(image_protocol, protocol::ImageProtocol::Ascii) {
-        Some(GraphWidthType::Single)
-    } else {
-        args.graph_width.or(core_config.option.graph_width)
-    };
+    let graph_width = args.graph_width.or(core_config.option.graph_width);
     let graph_style = args.graph_style.or(core_config.option.graph_style).into();
     let graph_image_width_mode = graph_config.row_image_width;
     let initial_selection = args
