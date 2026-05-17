@@ -1,11 +1,15 @@
 # Serie (fork)
 
-> This is a fork of [lusingander/serie](https://github.com/lusingander/serie) with additional features:
->
-> - **`--watch [SECONDS]` / `--fetch`** — auto-refresh the view on an interval (default 30s), optionally running `git fetch --all` first so commits pushed to remotes appear without manual intervention. See [PR #2](https://github.com/jpeletier/serie/pull/2).
-> - **`--protocol ascii`** — Unicode box-drawing fallback that works in any terminal (gnome-terminal, alacritty, xterm, Windows Terminal, etc.) without needing the Kitty or iTerm2 image protocols. Auto-detect now picks this when no image protocol is available instead of unconditionally trying iTerm2. See [PR #1](https://github.com/jpeletier/serie/pull/1).
->
-> Install: `cargo install --locked --git https://github.com/jpeletier/serie`
+This is a fork of [lusingander/serie](https://github.com/lusingander/serie) with additional features:
+
+- **`--watch [SECONDS]` / `--fetch`** — auto-refresh the view on an interval (default 30s), optionally running `git fetch --all` first so commits pushed to remotes appear without manual intervention. See [PR #2](https://github.com/jpeletier/serie/pull/2).
+- **`--protocol ascii`** — Unicode box-drawing fallback that works in any terminal (gnome-terminal, alacritty, xterm, Windows Terminal, etc.) without needing the Kitty or iTerm2 image protocols. Auto-detect now picks this when no image protocol is available instead of unconditionally trying iTerm2. See [PR #1](https://github.com/jpeletier/serie/pull/1).
+
+## Installing this fork:
+
+```bash
+cargo install --locked --git https://github.com/jpeletier/serie
+```
 
 ---
 
