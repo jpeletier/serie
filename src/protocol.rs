@@ -10,13 +10,24 @@ use ratatui::style::{Color, Style};
 // ASCII renderer when no graphics-capable terminal can be identified, so the tool
 // still works in terminals like gnome-terminal, alacritty, xterm, etc.
 pub fn auto_detect() -> ImageProtocol {
-    if detect_kitty_graphics_protocol() {
-        if detect_tmux() {
+    decide_protocol(
+        detect_kitty_graphics_protocol(),
+        detect_iterm2_graphics_protocol(),
+        detect_tmux(),
+    )
+}
+
+fn decide_protocol(kitty: bool, iterm: bool, tmux: bool) -> ImageProtocol {
+    if kitty {
+        if tmux {
             ImageProtocol::KittyUnicode { tmux: true }
         } else {
             ImageProtocol::Kitty
         }
-    } else if detect_iterm2_graphics_protocol() {
+    } else if iterm && !tmux {
+        // The iTerm2 inline-image OSC sequence has no tmux-passthrough variant in
+        // this code path, so tmux would swallow it. Fall through to ASCII instead
+        // — this also matches what the compatibility docs promise for tmux users.
         ImageProtocol::Iterm2
     } else {
         ImageProtocol::Ascii
@@ -636,5 +647,68 @@ fn passthrough_escapes(tmux: bool) -> (&'static str, &'static str, &'static str)
         ("\x1bPtmux;", "\x1b\x1b", "\x1b\\")
     } else {
         ("", "\x1b", "")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_proto(actual: ImageProtocol, expected: ImageProtocol) {
+        match (actual, expected) {
+            (ImageProtocol::Kitty, ImageProtocol::Kitty)
+            | (ImageProtocol::Iterm2, ImageProtocol::Iterm2)
+            | (ImageProtocol::Ascii, ImageProtocol::Ascii) => {}
+            (
+                ImageProtocol::KittyUnicode { tmux: a },
+                ImageProtocol::KittyUnicode { tmux: b },
+            ) if a == b => {}
+            (a, b) => panic!("expected {b:?}, got {a:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_detect_kitty_no_tmux_uses_plain_kitty() {
+        assert_proto(decide_protocol(true, false, false), ImageProtocol::Kitty);
+    }
+
+    #[test]
+    fn auto_detect_kitty_in_tmux_uses_unicode_placeholder() {
+        // Kitty has a tmux-passthrough variant — use it.
+        assert_proto(
+            decide_protocol(true, false, true),
+            ImageProtocol::KittyUnicode { tmux: true },
+        );
+    }
+
+    #[test]
+    fn auto_detect_kitty_takes_precedence_over_iterm() {
+        // If both signals fire, Kitty wins because its detection is more specific
+        // (KITTY_WINDOW_ID / Ghostty env vars) than iTerm's TERM_PROGRAM check.
+        assert_proto(decide_protocol(true, true, false), ImageProtocol::Kitty);
+        assert_proto(
+            decide_protocol(true, true, true),
+            ImageProtocol::KittyUnicode { tmux: true },
+        );
+    }
+
+    #[test]
+    fn auto_detect_iterm_no_tmux_uses_iterm() {
+        assert_proto(decide_protocol(false, true, false), ImageProtocol::Iterm2);
+    }
+
+    #[test]
+    fn auto_detect_iterm_in_tmux_falls_back_to_ascii() {
+        // The plain iTerm2 OSC has no tmux-passthrough wrapping in this codebase,
+        // so tmux would swallow the escape. Falling back to ASCII keeps the graph
+        // visible and matches what compatibility.md promises for tmux users.
+        assert_proto(decide_protocol(false, true, true), ImageProtocol::Ascii);
+    }
+
+    #[test]
+    fn auto_detect_no_signals_uses_ascii() {
+        assert_proto(decide_protocol(false, false, false), ImageProtocol::Ascii);
+        // Tmux on its own doesn't change the answer when no image protocol fires.
+        assert_proto(decide_protocol(false, false, true), ImageProtocol::Ascii);
     }
 }
