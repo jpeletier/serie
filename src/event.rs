@@ -164,9 +164,13 @@ impl EventController {
                 }
                 if fetch {
                     // Best-effort: ignore network / auth failures so the
-                    // refresh tick still fires.
+                    // refresh tick still fires. Force non-interactive so
+                    // the fetch can't hang on a prompt the user can't see
+                    // (TUI owns the terminal).
                     let _ = Command::new("git")
                         .args(["fetch", "--all", "--quiet"])
+                        .env("GIT_TERMINAL_PROMPT", "0")
+                        .stdin(Stdio::null())
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .status();
